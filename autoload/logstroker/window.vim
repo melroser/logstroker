@@ -6,6 +6,8 @@
 let s:logstroker_bufnr = -1
 let s:logstroker_winnr = -1
 let s:window_open = 0
+let s:last_refresh_time = 0
+let s:auto_refresh_enabled = 0
 
 " Toggle the analysis window
 function! logstroker#window#toggle()
@@ -14,6 +16,26 @@ function! logstroker#window#toggle()
   else
     call s:open_window()
   endif
+endfunction
+
+" Enable/disable auto-refresh for the window
+function! logstroker#window#toggle_auto_refresh()
+  let s:auto_refresh_enabled = !s:auto_refresh_enabled
+  
+  if s:auto_refresh_enabled && s:window_open
+    call logstroker#parser#start_monitoring()
+    echo "Logstroker: Auto-refresh enabled"
+  else
+    call logstroker#parser#stop_monitoring()
+    echo "Logstroker: Auto-refresh disabled"
+  endif
+  
+  return s:auto_refresh_enabled
+endfunction
+
+" Check if auto-refresh is enabled for window
+function! logstroker#window#is_auto_refresh_enabled()
+  return s:auto_refresh_enabled
 endfunction
 
 " Create and configure the analysis buffer
@@ -78,6 +100,9 @@ function! logstroker#window#setup_keymaps()
   execute 'nnoremap <buffer> <silent> q :call logstroker#window#toggle()<CR>'
   execute 'nnoremap <buffer> <silent> <ESC> :call logstroker#window#toggle()<CR>'
   execute 'nnoremap <buffer> <silent> r :call logstroker#window#refresh()<CR>'
+  execute 'nnoremap <buffer> <silent> a :call logstroker#window#toggle_auto_refresh()<CR>'
+  execute 'nnoremap <buffer> <silent> c :call logstroker#window#clear_cache()<CR>'
+  execute 'nnoremap <buffer> <silent> s :call logstroker#window#show_stats()<CR>'
   execute 'nnoremap <buffer> <silent> ? :call logstroker#window#show_help()<CR>'
   execute 'nnoremap <buffer> <silent> <CR> :call logstroker#window#select_item()<CR>'
   execute 'nnoremap <buffer> <silent> j j'
@@ -93,24 +118,70 @@ function! logstroker#window#refresh()
   endif
   
   try
-    " Get fresh analysis data
-    let l:keylog_path = logstroker#config#get_keylog_path()
-    let l:keystrokes = logstroker#parser#get_session_data()
-    let l:analysis = logstroker#anal#analyze_patterns(l:keystrokes)
-    let l:heatmap = logstroker#heatmap#generate_keyboard_heatmap(l:analysis)
+    " Check if enough time has passed since last refresh to avoid spam
+    let l:current_time = localtime()
+    if l:current_time - s:last_refresh_time < 1
+      return
+    endif
+    let s:last_refresh_time = l:current_time
     
-    " Update content
-    call logstroker#window#update_content(l:analysis, l:heatmap)
+    " Get fresh analysis data using real-time stats for efficiency
+    let l:stats = logstroker#parser#get_realtime_stats()
     
-    echo "Logstroker: Analysis refreshed"
+    if l:stats.success
+      " Use paginated data for large files
+      let l:session_data = logstroker#parser#get_session_data_paginated(1)
+      
+      if l:session_data.success
+        let l:analysis = logstroker#anal#analyze_patterns(l:session_data.data)
+        let l:heatmap = logstroker#heatmap#generate_keyboard_heatmap(l:analysis)
+        
+        " Add real-time stats to analysis
+        let l:analysis.realtime_stats = l:stats
+        let l:analysis.last_updated = strftime('%H:%M:%S')
+        
+        " Update content
+        call logstroker#window#update_content(l:analysis, l:heatmap)
+      endif
+    endif
+    
+    echo "Logstroker: Analysis refreshed at " . strftime('%H:%M:%S')
   catch
     echo "Logstroker: Error refreshing analysis - " . v:exception
   endtry
 endfunction
 
+" Clear cache and refresh
+function! logstroker#window#clear_cache()
+  call logstroker#parser#clear_cache()
+  call logstroker#window#refresh()
+  echo "Logstroker: Cache cleared and refreshed"
+endfunction
+
+" Show real-time statistics
+function! logstroker#window#show_stats()
+  let l:cache_stats = logstroker#parser#get_cache_stats()
+  let l:realtime_stats = logstroker#parser#get_realtime_stats()
+  
+  echo "=== Logstroker Statistics ==="
+  echo "Monitoring: " . (l:cache_stats.monitoring_active ? "Active" : "Inactive")
+  echo "Auto-refresh: " . (s:auto_refresh_enabled ? "Enabled" : "Disabled")
+  echo "Cached files: " . l:cache_stats.cached_files
+  echo "Cache entries: " . l:cache_stats.cache_entries
+  
+  if l:realtime_stats.success
+    echo "Current file: " . fnamemodify(l:realtime_stats.file, ':t')
+    echo "File size: " . (l:realtime_stats.file_size / 1024) . " KB"
+    echo "Last modified: " . l:realtime_stats.last_modified
+    echo "Est. keystrokes: " . l:realtime_stats.estimated_keystrokes
+  endif
+endfunction
+
 " Show help information
 function! logstroker#window#show_help()
-  echo "Logstroker Help: q/ESC=close, r=refresh, ?=help, Enter=select"
+  echo "Logstroker Help:"
+  echo "  q/ESC=close, r=refresh, a=toggle auto-refresh"
+  echo "  c=clear cache, s=show stats, ?=help, Enter=select"
 endfunction
 
 " Handle item selection (placeholder for future functionality)
@@ -164,6 +235,12 @@ function! s:open_window()
     " Update content with initial data
     call logstroker#window#update_content()
     
+    " Start monitoring if auto-refresh is enabled
+    if logstroker#config#is_auto_refresh_enabled()
+      let s:auto_refresh_enabled = 1
+      call logstroker#parser#start_monitoring()
+    endif
+    
     " Position cursor at top
     normal! gg
     
@@ -187,6 +264,10 @@ function! s:close_window()
     endif
   endif
   
+  " Stop monitoring when window closes
+  call logstroker#parser#stop_monitoring()
+  let s:auto_refresh_enabled = 0
+  
   let s:window_open = 0
   let s:logstroker_winnr = -1
   echo "Logstroker: Analysis window closed"
@@ -194,9 +275,12 @@ endfunction
 
 " Reset window state (for testing and cleanup)
 function! logstroker#window#reset_state()
+  call logstroker#parser#stop_monitoring()
   let s:logstroker_bufnr = -1
   let s:logstroker_winnr = -1
   let s:window_open = 0
+  let s:last_refresh_time = 0
+  let s:auto_refresh_enabled = 0
 endfunction
 
 " Generate window content from analysis data
@@ -206,10 +290,19 @@ function! s:generate_content(analysis, heatmap)
   " Header section
   call add(l:content, '┌─ Logstroker Analysis ─────────────────────────┐')
   
-  " Session info
+  " Session info with real-time status
   let l:session_time = get(a:analysis, 'session_time', '0 min')
   let l:total_time = get(a:analysis, 'total_time', '0 hours')
-  call add(l:content, '│ Session: ' . l:session_time . ' | Total: ' . l:total_time . repeat(' ', 47 - len('│ Session: ' . l:session_time . ' | Total: ' . l:total_time)) . '│')
+  let l:last_updated = get(a:analysis, 'last_updated', '')
+  let l:auto_status = s:auto_refresh_enabled ? ' [AUTO]' : ''
+  
+  let l:session_line = '│ Session: ' . l:session_time . ' | Total: ' . l:total_time . l:auto_status
+  call add(l:content, l:session_line . repeat(' ', 47 - len(l:session_line)) . '│')
+  
+  if !empty(l:last_updated)
+    let l:update_line = '│ Last updated: ' . l:last_updated
+    call add(l:content, l:update_line . repeat(' ', 47 - len(l:update_line)) . '│')
+  endif
   
   call add(l:content, '├───────────────────────────────────────────────┤')
   
@@ -260,10 +353,28 @@ function! s:generate_content(analysis, heatmap)
     call add(l:content, '│                                               │')
   endfor
   
+  " Real-time stats section if available
+  let l:realtime_stats = get(a:analysis, 'realtime_stats', {})
+  if !empty(l:realtime_stats) && l:realtime_stats.success
+    call add(l:content, '│                                               │')
+    call add(l:content, '│ REAL-TIME STATUS                              │')
+    let l:file_name = fnamemodify(l:realtime_stats.file, ':t')
+    let l:file_line = '│ File: ' . l:file_name
+    call add(l:content, l:file_line . repeat(' ', 47 - len(l:file_line)) . '│')
+    
+    let l:size_kb = l:realtime_stats.file_size / 1024
+    let l:size_line = '│ Size: ' . l:size_kb . ' KB, Lines: ' . l:realtime_stats.total_lines
+    call add(l:content, l:size_line . repeat(' ', 47 - len(l:size_line)) . '│')
+    
+    let l:monitoring_status = l:realtime_stats.monitoring_active ? 'Active' : 'Inactive'
+    let l:monitor_line = '│ Monitoring: ' . l:monitoring_status
+    call add(l:content, l:monitor_line . repeat(' ', 47 - len(l:monitor_line)) . '│')
+  endif
+  
   " Footer
   call add(l:content, '└───────────────────────────────────────────────┘')
   call add(l:content, '')
-  call add(l:content, 'Press ? for help, r to refresh, q to close')
+  call add(l:content, 'Press ? for help, a=auto-refresh, r=refresh, q=close')
   
   return l:content
 endfunction

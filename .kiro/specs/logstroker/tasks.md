@@ -37,7 +37,7 @@
   - Write tests for window creation, updates, and cleanup
   - _Requirements: 1.1, 1.2, 1.3, 6.3_
 
-- [ ] 6. Integrate real-time data updates
+- [x] 6. Integrate real-time data updates
   - Add automatic keylog file monitoring and refresh functionality
   - Implement session data tracking and real-time statistics updates
   - Create efficient data processing for large keylog files with pagination

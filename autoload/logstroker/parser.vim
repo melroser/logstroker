@@ -5,6 +5,9 @@
 " Global variables for session tracking
 let s:current_session_id = ''
 let s:session_start_time = 0
+let s:file_cache = {}
+let s:file_timestamps = {}
+let s:monitoring_active = 0
 
 " Initialize session tracking
 function! s:init_session()
@@ -448,5 +451,238 @@ function! logstroker#parser#get_log_directory_stats()
     \ 'oldest_file': l:oldest_file,
     \ 'newest_file': l:newest_file,
     \ 'date_range': strftime('%Y-%m-%d', l:oldest_time) . ' to ' . strftime('%Y-%m-%d', l:newest_time)
+  \ }
+endfunction
+
+" Check if file has been modified since last check
+function! logstroker#parser#file_changed(filepath)
+  let l:current_time = getftime(a:filepath)
+  let l:cached_time = get(s:file_timestamps, a:filepath, 0)
+  
+  if l:current_time > l:cached_time
+    let s:file_timestamps[a:filepath] = l:current_time
+    return 1
+  endif
+  
+  return 0
+endfunction
+
+" Read keylog with pagination for large files
+function! logstroker#parser#read_keylog_paginated(filepath, start_line, page_size)
+  let l:result = {
+    \ 'success': 0,
+    \ 'data': [],
+    \ 'error': '',
+    \ 'total_lines': 0,
+    \ 'has_more': 0
+  \ }
+  
+  let l:expanded_path = expand(a:filepath)
+  
+  if !filereadable(l:expanded_path)
+    let l:result.error = 'Keylog file not found: ' . l:expanded_path
+    return l:result
+  endif
+  
+  " Check file size
+  let l:file_size = getfsize(l:expanded_path)
+  let l:max_size = logstroker#config#get_max_file_size()
+  
+  try
+    let l:all_lines = readfile(l:expanded_path)
+    let l:result.total_lines = len(l:all_lines)
+    
+    " Calculate pagination
+    let l:start_idx = max([0, a:start_line - 1])
+    let l:end_idx = min([len(l:all_lines) - 1, l:start_idx + a:page_size - 1])
+    
+    let l:result.data = l:all_lines[l:start_idx:l:end_idx]
+    let l:result.has_more = l:end_idx < len(l:all_lines) - 1
+    let l:result.success = 1
+    
+  catch /^Vim\%((\a\+)\)\=:E/
+    let l:result.error = 'Failed to read keylog file: ' . v:exception
+  endtry
+  
+  return l:result
+endfunction
+
+" Get incremental updates from keylog file
+function! logstroker#parser#get_incremental_data(filepath)
+  let l:cache_key = a:filepath
+  
+  " Check if file has changed
+  if !logstroker#parser#file_changed(a:filepath)
+    return {'success': 1, 'data': [], 'incremental': 1, 'message': 'No changes detected'}
+  endif
+  
+  " Get cached line count
+  let l:cached_lines = get(s:file_cache, l:cache_key . '_lines', 0)
+  
+  " Read new lines only
+  let l:page_size = logstroker#config#get_page_size()
+  let l:read_result = logstroker#parser#read_keylog_paginated(a:filepath, l:cached_lines + 1, l:page_size)
+  
+  if !l:read_result.success
+    return l:read_result
+  endif
+  
+  " Update cache
+  let s:file_cache[l:cache_key . '_lines'] = l:read_result.total_lines
+  
+  " Parse new keystrokes
+  let l:new_keystrokes = logstroker#parser#parse_keystrokes(l:read_result.data)
+  
+  return {
+    \ 'success': 1,
+    \ 'data': l:new_keystrokes,
+    \ 'incremental': 1,
+    \ 'new_lines': len(l:read_result.data),
+    \ 'total_lines': l:read_result.total_lines
+  \ }
+endfunction
+
+" Start monitoring keylog files for changes
+function! logstroker#parser#start_monitoring()
+  if s:monitoring_active
+    return
+  endif
+  
+  let s:monitoring_active = 1
+  call s:schedule_monitoring_check()
+endfunction
+
+" Stop monitoring keylog files
+function! logstroker#parser#stop_monitoring()
+  let s:monitoring_active = 0
+endfunction
+
+" Check if monitoring is active
+function! logstroker#parser#is_monitoring()
+  return s:monitoring_active
+endfunction
+
+" Private function to schedule monitoring checks
+function! s:schedule_monitoring_check()
+  if !s:monitoring_active || !logstroker#config#is_auto_refresh_enabled()
+    return
+  endif
+  
+  let l:interval = logstroker#config#get_auto_refresh() * 1000  " Convert to milliseconds
+  call timer_start(l:interval, 's:monitoring_callback')
+endfunction
+
+" Monitoring callback function
+function! s:monitoring_callback(timer_id)
+  if !s:monitoring_active
+    return
+  endif
+  
+  try
+    " Check if analysis window is open
+    if logstroker#window#is_open()
+      " Get keylog path
+      let l:keylog_path = logstroker#config#get_keylog_path()
+      
+      " Check for changes in recent files
+      let l:log_files = s:find_log_files(l:keylog_path)
+      let l:has_changes = 0
+      
+      for log_file in l:log_files[0:2]  " Check top 3 most recent files
+        if logstroker#parser#file_changed(log_file)
+          let l:has_changes = 1
+          break
+        endif
+      endfor
+      
+      " Refresh window if changes detected
+      if l:has_changes
+        call logstroker#window#refresh()
+      endif
+    endif
+  catch
+    " Silently handle errors to avoid disrupting user workflow
+  endtry
+  
+  " Schedule next check
+  call s:schedule_monitoring_check()
+endfunction
+
+" Clear file cache
+function! logstroker#parser#clear_cache()
+  let s:file_cache = {}
+  let s:file_timestamps = {}
+endfunction
+
+" Get cache statistics
+function! logstroker#parser#get_cache_stats()
+  return {
+    \ 'cached_files': len(s:file_timestamps),
+    \ 'cache_entries': len(s:file_cache),
+    \ 'monitoring_active': s:monitoring_active
+  \ }
+endfunction
+
+" Efficient session data tracking with pagination
+function! logstroker#parser#get_session_data_paginated(page_number)
+  let l:page_size = logstroker#config#get_page_size()
+  let l:start_line = (a:page_number - 1) * l:page_size + 1
+  
+  let l:recent_log = s:get_most_recent_log()
+  
+  if empty(l:recent_log)
+    return {'success': 0, 'error': 'No log files found', 'data': []}
+  endif
+  
+  let l:read_result = logstroker#parser#read_keylog_paginated(l:recent_log, l:start_line, l:page_size)
+  
+  if !l:read_result.success
+    return l:read_result
+  endif
+  
+  let l:keystrokes = logstroker#parser#parse_keystrokes(l:read_result.data)
+  
+  return {
+    \ 'success': 1,
+    \ 'data': l:keystrokes,
+    \ 'page': a:page_number,
+    \ 'page_size': l:page_size,
+    \ 'total_lines': l:read_result.total_lines,
+    \ 'has_more': l:read_result.has_more,
+    \ 'file': l:recent_log
+  \ }
+endfunction
+
+" Get real-time statistics without full file parsing
+function! logstroker#parser#get_realtime_stats()
+  let l:log_dir = logstroker#config#get_keylog_path()
+  let l:log_files = s:find_log_files(l:log_dir)
+  
+  if len(l:log_files) == 0
+    return {'success': 0, 'error': 'No log files found'}
+  endif
+  
+  let l:recent_file = l:log_files[0]
+  let l:file_size = getfsize(l:recent_file)
+  let l:mod_time = getftime(l:recent_file)
+  
+  " Quick line count estimation
+  let l:sample_result = logstroker#parser#read_keylog_paginated(l:recent_file, 1, 100)
+  let l:estimated_keystrokes = 0
+  
+  if l:sample_result.success && len(l:sample_result.data) > 0
+    let l:sample_keystrokes = logstroker#parser#parse_keystrokes(l:sample_result.data)
+    let l:keystrokes_per_line = len(l:sample_keystrokes) / len(l:sample_result.data)
+    let l:estimated_keystrokes = float2nr(l:keystrokes_per_line * l:sample_result.total_lines)
+  endif
+  
+  return {
+    \ 'success': 1,
+    \ 'file': l:recent_file,
+    \ 'file_size': l:file_size,
+    \ 'last_modified': strftime('%Y-%m-%d %H:%M:%S', l:mod_time),
+    \ 'estimated_keystrokes': l:estimated_keystrokes,
+    \ 'total_lines': get(l:sample_result, 'total_lines', 0),
+    \ 'monitoring_active': s:monitoring_active
   \ }
 endfunction

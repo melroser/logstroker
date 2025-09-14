@@ -14,13 +14,13 @@ A Vim plugin for analyzing keystroke patterns and providing ergonomic and effici
 
 ### Using vim-plug
 ```vim
-Plug 'your-username/logstroker'
+Plug 'melroser/logstroker'
 ```
 
 ### Manual Installation
 1. Clone this repository to your vim plugin directory:
    ```bash
-   git clone https://github.com/your-username/logstroker.git ~/.vim/pack/plugins/start/logstroker
+   git clone https://github.com/melroser/logstroker.git ~/.vim/pack/plugins/start/logstroker
    ```
 
 ## Configuration
