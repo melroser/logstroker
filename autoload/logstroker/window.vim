@@ -21,7 +21,7 @@ function! logstroker#window#create_buffer()
   " Create a new buffer for the analysis window
   let l:bufnr = bufnr('__Logstroker_Analysis__', 1)
   
-  " Configure buffer settings
+  " Configure buffer settings using setbufvar to avoid switching buffers
   call setbufvar(l:bufnr, '&buftype', 'nofile')
   call setbufvar(l:bufnr, '&bufhidden', 'hide')
   call setbufvar(l:bufnr, '&swapfile', 0)
@@ -29,10 +29,10 @@ function! logstroker#window#create_buffer()
   call setbufvar(l:bufnr, '&modifiable', 0)
   call setbufvar(l:bufnr, '&readonly', 1)
   call setbufvar(l:bufnr, '&wrap', 0)
-  call setbufvar(l:bufnr, '&number', 0)
-  call setbufvar(l:bufnr, '&relativenumber', 0)
-  call setbufvar(l:bufnr, '&cursorline', 1)
   call setbufvar(l:bufnr, '&filetype', 'logstroker')
+  
+  " Store buffer number for tracking
+  let s:logstroker_bufnr = l:bufnr
   
   return l:bufnr
 endfunction
@@ -150,6 +150,11 @@ function! s:open_window()
     let s:logstroker_winnr = winnr()
     let s:window_open = 1
     
+    " Set window-specific display options
+    setlocal nonumber
+    setlocal norelativenumber
+    setlocal cursorline
+    
     " Set up key mappings
     call logstroker#window#setup_keymaps()
     
@@ -185,6 +190,13 @@ function! s:close_window()
   let s:window_open = 0
   let s:logstroker_winnr = -1
   echo "Logstroker: Analysis window closed"
+endfunction
+
+" Reset window state (for testing and cleanup)
+function! logstroker#window#reset_state()
+  let s:logstroker_bufnr = -1
+  let s:logstroker_winnr = -1
+  let s:window_open = 0
 endfunction
 
 " Generate window content from analysis data

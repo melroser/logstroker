@@ -21,7 +21,7 @@
   - Write unit tests for analysis logic and suggestion generation
   - _Requirements: 6.1, 6.2, 6.4, 5.3_
 
-- [ ] 4. Create heatmap visualization system
+- [x] 4. Create heatmap visualization system
   - Implement heatmap module to generate keyboard layout visualizations
   - Create ASCII-based heatmap rendering with intensity indicators and color coding
   - Add command frequency visualization with bars and percentages
@@ -29,7 +29,7 @@
   - Write tests for heatmap generation with different data sets
   - _Requirements: 3.1, 3.2, 3.4, 4.5_
 
-- [ ] 5. Build analysis window interface
+- [x] 5. Build analysis window interface
   - Create window module for managing the popup analysis buffer
   - Implement window toggle functionality with configurable key mapping
   - Design window layout with sections for heatmap, statistics, and suggestions
