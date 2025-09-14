@@ -1,0 +1,27 @@
+# Vim files
+*.swp
+*.swo
+*~
+.netrwhist
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files (optional - you might want to track sample logs)
+*.log
+
+# Temporary test files
+test_*.vim
+debug_*.vim
+simple_*.vim
+working_*.vim
+comprehensive_*.vim
+real_log_*.vim
+
+# IDE files
+.vscode/settings.json
+.idea/
+
+# Build artifacts (if any)
+tags
