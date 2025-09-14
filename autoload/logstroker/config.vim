@@ -24,9 +24,9 @@ function! logstroker#config#load_defaults()
     let g:logstroker_auto_refresh = 5
   endif
   
-  " Enable/disable auto-refresh
+  " Enable/disable auto-refresh (DISABLED by default)
   if !exists('g:logstroker_enable_auto_refresh')
-    let g:logstroker_enable_auto_refresh = 1
+    let g:logstroker_enable_auto_refresh = 0
   endif
   
   " Maximum file size for real-time processing (bytes)

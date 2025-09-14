@@ -8,6 +8,7 @@ let s:logstroker_winnr = -1
 let s:window_open = 0
 let s:last_refresh_time = 0
 let s:auto_refresh_enabled = 0
+let s:auto_refresh_timer = -1
 
 " Toggle the analysis window
 function! logstroker#window#toggle()
@@ -23,14 +24,39 @@ function! logstroker#window#toggle_auto_refresh()
   let s:auto_refresh_enabled = !s:auto_refresh_enabled
   
   if s:auto_refresh_enabled && s:window_open
-    call logstroker#parser#start_monitoring()
-    echo "Logstroker: Auto-refresh enabled"
+    call s:start_auto_refresh()
+    echo "Logstroker: Auto-refresh enabled (every " . logstroker#config#get_auto_refresh() . "s)"
   else
-    call logstroker#parser#stop_monitoring()
+    call s:stop_auto_refresh()
     echo "Logstroker: Auto-refresh disabled"
   endif
   
   return s:auto_refresh_enabled
+endfunction
+
+" Start auto-refresh timer
+function! s:start_auto_refresh()
+  if s:auto_refresh_timer != -1
+    call timer_stop(s:auto_refresh_timer)
+  endif
+  
+  let l:interval = logstroker#config#get_auto_refresh() * 1000  " Convert to milliseconds
+  let s:auto_refresh_timer = timer_start(l:interval, 's:auto_refresh_callback', {'repeat': -1})
+endfunction
+
+" Stop auto-refresh timer
+function! s:stop_auto_refresh()
+  if s:auto_refresh_timer != -1
+    call timer_stop(s:auto_refresh_timer)
+    let s:auto_refresh_timer = -1
+  endif
+endfunction
+
+" Auto-refresh callback
+function! s:auto_refresh_callback(timer_id)
+  if s:window_open && s:auto_refresh_enabled
+    call logstroker#window#refresh()
+  endif
 endfunction
 
 " Check if auto-refresh is enabled for window
@@ -48,8 +74,8 @@ function! logstroker#window#create_buffer()
   call setbufvar(l:bufnr, '&bufhidden', 'hide')
   call setbufvar(l:bufnr, '&swapfile', 0)
   call setbufvar(l:bufnr, '&buflisted', 0)
-  call setbufvar(l:bufnr, '&modifiable', 0)
-  call setbufvar(l:bufnr, '&readonly', 1)
+  call setbufvar(l:bufnr, '&modifiable', 1)
+  call setbufvar(l:bufnr, '&readonly', 0)
   call setbufvar(l:bufnr, '&wrap', 0)
   call setbufvar(l:bufnr, '&filetype', 'logstroker')
   
@@ -61,33 +87,12 @@ endfunction
 
 " Update window content with analysis data
 function! logstroker#window#update_content(...)
-  if !s:window_open || !bufexists(s:logstroker_bufnr)
+  if !bufexists(s:logstroker_bufnr)
     return
   endif
   
-  " Get analysis data (use dummy data if not provided)
-  let l:analysis = a:0 > 0 ? a:1 : s:get_dummy_analysis()
-  let l:heatmap = a:0 > 1 ? a:2 : s:get_dummy_heatmap()
-  
-  " Switch to the analysis buffer
-  let l:current_win = winnr()
-  execute bufwinnr(s:logstroker_bufnr) . 'wincmd w'
-  
-  " Make buffer modifiable for updates
-  setlocal modifiable
-  
-  " Clear existing content
-  silent %delete _
-  
-  " Generate and insert content
-  let l:content = s:generate_content(l:analysis, l:heatmap)
-  call setline(1, l:content)
-  
-  " Make buffer read-only again
-  setlocal nomodifiable
-  
-  " Return to original window
-  execute l:current_win . 'wincmd w'
+  " This function is deprecated - content is now generated directly in refresh
+  return
 endfunction
 
 " Set up window-specific key mappings
@@ -102,7 +107,7 @@ function! logstroker#window#setup_keymaps()
   execute 'nnoremap <buffer> <silent> r :call logstroker#window#refresh()<CR>'
   execute 'nnoremap <buffer> <silent> a :call logstroker#window#toggle_auto_refresh()<CR>'
   execute 'nnoremap <buffer> <silent> c :call logstroker#window#clear_cache()<CR>'
-  execute 'nnoremap <buffer> <silent> s :call logstroker#window#show_stats()<CR>'
+
   execute 'nnoremap <buffer> <silent> ? :call logstroker#window#show_help()<CR>'
   execute 'nnoremap <buffer> <silent> <CR> :call logstroker#window#select_item()<CR>'
   execute 'nnoremap <buffer> <silent> j j'
@@ -118,36 +123,110 @@ function! logstroker#window#refresh()
   endif
   
   try
-    " Check if enough time has passed since last refresh to avoid spam
-    let l:current_time = localtime()
-    if l:current_time - s:last_refresh_time < 1
-      return
-    endif
-    let s:last_refresh_time = l:current_time
+    " Debug: show what path we're looking for
+    let l:keylog_path = logstroker#config#get_keylog_path()
+    " Try to get the most recent keylog file directly
+    let l:log_files = glob(l:keylog_path . '/vimlog*.txt', 0, 1)
     
-    " Get fresh analysis data using real-time stats for efficiency
-    let l:stats = logstroker#parser#get_realtime_stats()
-    
-    if l:stats.success
-      " Use paginated data for large files
-      let l:session_data = logstroker#parser#get_session_data_paginated(1)
+    if len(l:log_files) > 0
+      " Sort by modification time (newest first)
+      let l:file_times = []
+      for file in l:log_files
+        call add(l:file_times, [getftime(file), file])
+      endfor
+      call sort(l:file_times, {a, b -> b[0] - a[0]})
       
-      if l:session_data.success
-        let l:analysis = logstroker#anal#analyze_patterns(l:session_data.data)
-        let l:heatmap = logstroker#heatmap#generate_keyboard_heatmap(l:analysis)
-        
-        " Add real-time stats to analysis
-        let l:analysis.realtime_stats = l:stats
-        let l:analysis.last_updated = strftime('%H:%M:%S')
-        
-        " Update content
-        call logstroker#window#update_content(l:analysis, l:heatmap)
+      " Get the second most recent file (previous session)
+      if len(l:file_times) > 1
+        let l:recent_file = l:file_times[1][1]
+      else
+        let l:recent_file = l:file_times[0][1]
       endif
+      
+      " Read and parse the file
+      let l:raw_data = logstroker#parser#read_keylog(l:recent_file)
+      if l:raw_data.success
+        let l:keystrokes = logstroker#parser#parse_keystrokes(l:raw_data.data)
+        
+        if len(l:keystrokes) > 0
+          " Create simple analysis data to avoid dictionary errors
+          let l:simple_analysis = {
+            \ 'total_keystrokes': len(l:keystrokes),
+            \ 'key_frequencies': {},
+            \ 'suggestions': [{'text': 'Analysis completed with ' . len(l:keystrokes) . ' keystrokes'}]
+          \ }
+          
+          " Count key frequencies manually
+          for keystroke in l:keystrokes
+            let l:key = keystroke.key
+            if has_key(l:simple_analysis.key_frequencies, l:key)
+              let l:simple_analysis.key_frequencies[l:key] += 1
+            else
+              let l:simple_analysis.key_frequencies[l:key] = 1
+            endif
+          endfor
+          
+          " Create content with keyboard heatmap
+          let l:simple_content = [
+            \ '┌─ Logstroker Analysis ─────────────────────────┐',
+            \ '│ Loaded ' . len(l:keystrokes) . ' keystrokes from previous session │',
+            \ '├───────────────────────────────────────────────┤',
+            \ '│ KEYBOARD HEATMAP:                             │'
+          \ ]
+          
+          " Generate simple keyboard heatmap
+          let l:heatmap_lines = s:generate_simple_heatmap(l:simple_analysis.key_frequencies)
+          for line in l:heatmap_lines
+            call add(l:simple_content, '│ ' . line . repeat(' ', 45 - len(line)) . '│')
+          endfor
+          
+          call add(l:simple_content, '│                                               │')
+          call add(l:simple_content, '│ TOP KEYS:                                     │')
+          
+          " Add top 5 readable keys (filter out weird codes)
+          let l:readable_keys = []
+          for key in keys(l:simple_analysis.key_frequencies)
+            " Only show readable keys (letters, numbers, common symbols)
+            if key =~# '^[a-zA-Z0-9.,;:!?<>(){}[\]"'"'"'`~@#$%^&*+=/_-]$' || key ==# ' '
+              call add(l:readable_keys, key)
+            endif
+          endfor
+          
+          let l:sorted_keys = sort(l:readable_keys, {a, b -> l:simple_analysis.key_frequencies[b] - l:simple_analysis.key_frequencies[a]})
+          for i in range(min([5, len(l:sorted_keys)]))
+            let l:key = l:sorted_keys[i]
+            let l:count = l:simple_analysis.key_frequencies[l:key]
+            let l:display_key = l:key ==# ' ' ? '<Space>' : l:key
+            let l:line = '│ ' . l:display_key . ': ' . l:count . ' times'
+            call add(l:simple_content, l:line . repeat(' ', 47 - len(l:line)) . '│')
+          endfor
+          
+          call add(l:simple_content, '└───────────────────────────────────────────────┘')
+          call add(l:simple_content, 'Press a=auto-refresh, r=refresh, q=close')
+          
+          " Update buffer directly
+          setlocal modifiable
+          setlocal noreadonly
+          silent %delete _
+          call setline(1, l:simple_content)
+          setlocal nomodifiable
+          
+          " Silently loaded keystrokes
+        else
+          call logstroker#window#update_content()
+          echo "Logstroker: No keystrokes found in file"
+        endif
+      else
+        call logstroker#window#update_content()
+        echo "Logstroker: Error reading file - " . l:raw_data.error
+      endif
+    else
+      call logstroker#window#update_content()
+      echo "Logstroker: No vimlog*.txt files found in " . l:keylog_path
     endif
-    
-    echo "Logstroker: Analysis refreshed at " . strftime('%H:%M:%S')
   catch
-    echo "Logstroker: Error refreshing analysis - " . v:exception
+    call logstroker#window#update_content()
+    echo "Logstroker: Error - " . v:exception
   endtry
 endfunction
 
@@ -158,23 +237,18 @@ function! logstroker#window#clear_cache()
   echo "Logstroker: Cache cleared and refreshed"
 endfunction
 
-" Show real-time statistics
+" Show simple statistics
 function! logstroker#window#show_stats()
-  let l:cache_stats = logstroker#parser#get_cache_stats()
-  let l:realtime_stats = logstroker#parser#get_realtime_stats()
+  let l:keylog_path = logstroker#config#get_keylog_path()
+  let l:log_files = glob(l:keylog_path . '/vimlog*.txt', 0, 1)
   
   echo "=== Logstroker Statistics ==="
-  echo "Monitoring: " . (l:cache_stats.monitoring_active ? "Active" : "Inactive")
-  echo "Auto-refresh: " . (s:auto_refresh_enabled ? "Enabled" : "Disabled")
-  echo "Cached files: " . l:cache_stats.cached_files
-  echo "Cache entries: " . l:cache_stats.cache_entries
-  
-  if l:realtime_stats.success
-    echo "Current file: " . fnamemodify(l:realtime_stats.file, ':t')
-    echo "File size: " . (l:realtime_stats.file_size / 1024) . " KB"
-    echo "Last modified: " . l:realtime_stats.last_modified
-    echo "Est. keystrokes: " . l:realtime_stats.estimated_keystrokes
-  endif
+  echo "Keylog directory: " . l:keylog_path
+  echo "Total log files: " . len(l:log_files)
+  echo "Auto-refresh: Disabled (simplified version)"
+  echo "Real-time monitoring: Disabled (simplified version)"
+  echo ""
+  echo "Press r to refresh analysis with latest data"
 endfunction
 
 " Show help information
@@ -232,14 +306,22 @@ function! s:open_window()
     " Set window title
     execute 'file __Logstroker_Analysis__'
     
-    " Update content with initial data
-    call logstroker#window#update_content()
+    " Load real data immediately when window opens
+    try
+      call logstroker#window#refresh()
+    catch
+      " If refresh fails, show error message
+      setlocal modifiable
+      call setline(1, ['Error loading data: ' . v:exception, 'Press r to try again'])
+      setlocal nomodifiable
+    endtry
+
     
-    " Start monitoring if auto-refresh is enabled
-    if logstroker#config#is_auto_refresh_enabled()
-      let s:auto_refresh_enabled = 1
-      call logstroker#parser#start_monitoring()
-    endif
+    " Auto-refresh disabled by default
+    " if logstroker#config#is_auto_refresh_enabled()
+    "   let s:auto_refresh_enabled = 1
+    "   call logstroker#parser#start_monitoring()
+    " endif
     
     " Position cursor at top
     normal! gg
@@ -291,12 +373,17 @@ function! s:generate_content(analysis, heatmap)
   call add(l:content, '┌─ Logstroker Analysis ─────────────────────────┐')
   
   " Session info with real-time status
-  let l:session_time = get(a:analysis, 'session_time', '0 min')
-  let l:total_time = get(a:analysis, 'total_time', '0 hours')
+  let l:statistics = get(a:analysis, 'statistics', {})
+  let l:session_summary = get(l:statistics, 'session_summary', {})
+  let l:session_time = get(l:session_summary, 'duration', '0 min')
+  let l:total_keystrokes = get(a:analysis, 'total_keystrokes', 0)
+  if type(l:total_keystrokes) != type(0)
+    let l:total_keystrokes = 0
+  endif
   let l:last_updated = get(a:analysis, 'last_updated', '')
   let l:auto_status = s:auto_refresh_enabled ? ' [AUTO]' : ''
   
-  let l:session_line = '│ Session: ' . l:session_time . ' | Total: ' . l:total_time . l:auto_status
+  let l:session_line = '│ Session: ' . l:session_time . ' | Keys: ' . l:total_keystrokes . l:auto_status
   call add(l:content, l:session_line . repeat(' ', 47 - len(l:session_line)) . '│')
   
   if !empty(l:last_updated)
@@ -317,14 +404,33 @@ function! s:generate_content(analysis, heatmap)
   
   " Top commands section
   call add(l:content, '│ TOP COMMANDS (Current Session)                │')
-  let l:commands = get(a:analysis, 'top_commands', [])
+  let l:key_frequencies = get(a:analysis, 'key_frequencies', {})
+  let l:total_keys = get(a:analysis, 'total_keystrokes', 1)
+  if type(l:total_keys) != type(0)
+    let l:total_keys = 1
+  endif
+  
+  " Convert key frequencies to sorted list
+  let l:commands = []
+  for key in keys(l:key_frequencies)
+    let l:count = l:key_frequencies[key]
+    let l:percent = l:total_keys > 0 ? (l:count * 100) / l:total_keys : 0
+    call add(l:commands, {'key': key, 'count': l:count, 'percent': l:percent})
+  endfor
+  
+  " Sort by count (descending)
+  call sort(l:commands, {a, b -> b.count - a.count})
+  
   for i in range(min([len(l:commands), 5]))
     let l:cmd = l:commands[i]
-    let l:name = get(l:cmd, 'key', '?')
-    let l:count = get(l:cmd, 'count', 0)
-    let l:percent = get(l:cmd, 'percent', 0)
-    let l:bar = repeat('█', l:percent / 5)
+    let l:name = l:cmd.key
+    let l:count = l:cmd.count
+    let l:percent = l:cmd.percent
+    let l:bar = repeat('█', min([l:percent / 2, 20]))  " Scale bar appropriately
     let l:line = printf('%s: %s %d (%d%%)', l:name, l:bar, l:count, l:percent)
+    if len(l:line) > 45
+      let l:line = l:line[:min([41, len(l:line)-1])] . '...'
+    endif
     call add(l:content, '│ ' . l:line . repeat(' ', 45 - len(l:line)) . '│')
   endfor
   
@@ -343,7 +449,7 @@ function! s:generate_content(analysis, heatmap)
     let l:text = get(l:suggestion, 'text', 'No suggestions available')
     " Truncate long suggestions
     if len(l:text) > 41
-      let l:text = l:text[:37] . '...'
+      let l:text = l:text[:min([37, len(l:text)-1])] . '...'
     endif
     call add(l:content, '│ • ' . l:text . repeat(' ', 43 - len(l:text)) . '│')
   endfor
@@ -379,14 +485,51 @@ function! s:generate_content(analysis, heatmap)
   return l:content
 endfunction
 
-" Format heatmap data for display
-function! s:format_heatmap(heatmap)
+" Generate simple heatmap showing key usage intensity
+function! s:generate_simple_heatmap(key_frequencies)
   let l:lines = []
   
-  " Simple ASCII keyboard layout
-  call add(l:lines, '[q][w][e][r][t][y][u][i][o][p]')
-  call add(l:lines, ' [a][s][d][f][g][h][j][k][l]')
-  call add(l:lines, '  [z][x][c][v][b][n][m]')
+  " Define keyboard layout
+  let l:rows = [
+    \ ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+    \ ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
+    \ ['z', 'x', 'c', 'v', 'b', 'n', 'm']
+  \ ]
+  
+  " Find max frequency for scaling (only readable keys)
+  let l:max_freq = 0
+  for [key, freq] in items(a:key_frequencies)
+    if key =~# '^[a-zA-Z0-9]$' && freq > l:max_freq
+      let l:max_freq = freq
+    endif
+  endfor
+  
+  " Generate heatmap rows
+  for row in l:rows
+    let l:line = ''
+    for key in row
+      let l:freq = get(a:key_frequencies, key, 0)
+      if l:max_freq > 0
+        let l:intensity = (l:freq * 3) / l:max_freq  " Scale 0-3
+      else
+        let l:intensity = 0
+      endif
+      
+      " Choose character based on intensity
+      if l:intensity >= 3
+        let l:char = '█'  " Heavy usage
+      elseif l:intensity >= 2
+        let l:char = '▓'  " Medium usage
+      elseif l:intensity >= 1
+        let l:char = '▒'  " Light usage
+      else
+        let l:char = '░'  " Very light/no usage
+      endif
+      
+      let l:line .= '[' . l:char . ']'
+    endfor
+    call add(l:lines, l:line)
+  endfor
   
   return l:lines
 endfunction
